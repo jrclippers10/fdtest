@@ -7,7 +7,7 @@ import (
     "errors"
     "time"
     "log"
-    "sort"
+    // "sort"
     "strings"
 	"encoding/json"
 )
@@ -255,6 +255,33 @@ func calcValues(available []Player) []Player {
     return ret
 }
 
+
+func combine(v []Player, start int, n []Player, k, maxk int) {
+    i := start
+    /* k here counts through positions in the maxk-element v.
+     * if k > maxk, then the v is complete and we can use it.
+     */
+    if (k >= maxk) {
+        /* insert code here to use combinations as you please */
+        for _, p := range v {
+           log.Println(p.FirstName, p.LastName, p.value)
+        }
+        log.Println("*******")
+        return
+    }
+    /* for this k'th element of the v, try all start..n
+     * elements in that position
+     */
+    for i < len(n) {
+        v[k] = n[i]
+        /* recursively generate combinations of players
+         * from i+1..n
+         */
+        combine(v, i+1, n, k+1, maxk)
+        i++
+    }
+}
+
 func goGetIt() error {
 	url := "https://api.fanduel.com/fixture-lists/14112/players"
     log.Println("URL: ", url)
@@ -284,6 +311,13 @@ func goGetIt() error {
     log.Println("", len(d))
     d = excludeLowValue(d)
     log.Println("", len(d))
+    /* generate all combinations of n elements taken
+     * k at a time, starting with combinations containing 0
+     * in the first position.
+     */
+    k := 9
+    combine(make([]Player, k), 0, d, 0, k);
+
     // sort.Sort(ByValue(d))
     // sortIntoGroups(d)
     
