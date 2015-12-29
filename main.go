@@ -3,13 +3,11 @@ package main
 import (
     "net/http"
     "io/ioutil"
-	"math/rand"
     "errors"
-    "time"
     "log"
-    // "sort"
-    "strings"
-	"encoding/json"
+    "sort"
+    "sync"
+	  "encoding/json"
 )
 
 type Player struct {
@@ -31,36 +29,10 @@ type Player struct {
 }
 
 type FDLineup struct {
-    posCounts map[string]int
-    teamCounts map[string]int
-    Players []*Player
+    Players []Player
     Salary float64
-    projectedScore float64
-    status string
-}
-
-type ByProjectedScore []*FDLineup
-func (s ByProjectedScore) Len() int {
-    return len(s)
-}
-func (s ByProjectedScore) Swap(i, j int) {
-    s[i], s[j] = s[j], s[i]
-}
-func (s ByProjectedScore) Less(i, j int) bool {
-    return s[i].projectedScore > s[j].projectedScore
-}
-
-type ByValue []Player
-func (s ByValue) Len() int {
-    return len(s)
-}
-func (s ByValue) Swap(i, j int) {
-    s[i], s[j] = s[j], s[i]
-}
-func (s ByValue) Less(i, j int) bool {
-    return s[i].value > s[j].value
-}
-   
+    ProjectedScore float64
+}  
 
 func (p *Player) String() (*string, error) {
     b, err := json.Marshal(p)
@@ -81,9 +53,9 @@ func (l *FDLineup) String() (*string, error) {
 }
 
 func (l *FDLineup) PrintMe() {
-    log.Println(l.projectedScore)
+    log.Println(l.ProjectedScore)
     log.Println(l.Salary)
-    for _,p := range l.Players {
+    for _, p := range l.Players {
         // fmt.Printf("%+v", p)
         log.Println(p.FirstName, p.LastName)
 
@@ -96,7 +68,16 @@ type FDPlayersResponse struct {
     Players []Player
 }
 
-var positions map[string][]Player
+var positions = map[string][]Player{
+        "RW": []Player{},
+        "LW": []Player{},
+        "D": []Player{}, 
+        "C": []Player{}, 
+        "G": []Player{},
+    }
+var lineupChan = make(chan FDLineup)
+var validLineups []FDLineup
+
 
 func newFDPlayersResponse(body []byte) *FDPlayersResponse {
     j := FDPlayersResponse{}
@@ -104,110 +85,93 @@ func newFDPlayersResponse(body []byte) *FDPlayersResponse {
     return &j
 }
 
-func (l *FDLineup) isValid() error {
+func (l *FDLineup) isValid() bool {
     if len(l.Players) > 9 {
-        return errors.New("Too many Players")
+        return false //errors.New("Too many Players")
     }
-    if l.posCounts["lw"] > 2 {
-        return errors.New("Too many RWs")
-    }
-    if l.posCounts["rw"] > 2 {
-        return errors.New("Too many LWs")
-    }
-    if l.posCounts["c"] > 2 {
-        return errors.New("Too many Cs")
-    }
-    if l.posCounts["d"] > 2 {
-        return errors.New("Too many Ds")
-    }
-    if l.posCounts["g"] > 1 {
-        return errors.New("Too many Gs")
+    if len(l.Players) < 9 {
+        return false //errors.New("Too few Players")
     }
     if l.Salary > 55000 {
-        return errors.New("Invalid Salary")
+        return false //errors.New("Invalid Salary")
     }
-    for _, v := range l.teamCounts {
-        if v > 4 {
-            return errors.New("Too many players on one team")
-        }
-    }
-    if len(l.Players) == 9 {
-        l.status = "complete"
-        for _, i := range l.Players {
-            l.projectedScore += i.Fppg
-        }
-    }
-    return nil
+    // for _, v := range l.teamCounts {
+    //     if v > 4 {
+    //         return errors.New("Too many players on one team")
+    //     }
+    // }
+    return true
 }
 
-func (l *FDLineup) AddPlayer(p *Player) {
-    if len(l.Players) >= 9 {
-        return 
-    }
-    l.Players = append(l.Players, p)
-    l.Salary += p.Salary
-    l.posCounts[p.Position] += 1
-    if _, ok := l.teamCounts[p.Team.Members[0]]; ok {
-        l.teamCounts[p.Team.Members[0]] += 1
-    } else {
-        l.teamCounts[p.Team.Members[0]] = 1
-    }
-    if err := l.isValid(); err != nil {
-        //delete last element
-        lastI := len(l.Players) - 1
-        l.Players, l.Players[lastI] = append(l.Players[:lastI], l.Players[lastI+1:]...), nil
-        l.Salary -= p.Salary
-        l.posCounts[strings.ToLower(p.Position)] -= 1
-        l.teamCounts[p.Team.Members[0]] -= 1
+func (l *FDLineup) calcProjectedScore() {
+    for _, p := range l.Players {
+        l.ProjectedScore += p.Fppg
     }
     return
 }
 
-func newFDLineup() *FDLineup{
-    return &FDLineup{
-        status: "new",
-        posCounts: map[string]int{
-            "RW": 0,
-            "LW": 0,
-            "C": 0,
-            "D": 0,
-            "G": 0,
-        },
-        teamCounts: map[string]int{},
-        projectedScore: 0,
+func (l *FDLineup) calcSalary() {
+    for _, p := range l.Players {
+        l.Salary += p.Salary
     }
+    return
 }
 
-func generateAllFDLineups(available []Player) []*FDLineup {
-    var validLineups []*FDLineup
-    for len(validLineups) < 150 {
-        l := newFDLineup()
-        for l.status == "new" {
-            rn := rand.Intn(len(available)-1)
-            p := available[rn]
-            l.AddPlayer(&p)
-        }
-        if l.status == "complete" {
-            l.PrintMe()
-            time.Sleep(2 * time.Second)
-            // validLineups = append(validLineups, l)
-        }
+func newFDLineup(p []Player) FDLineup {
+    players := make([]Player, 9)
+    copy(players, p)
+    l := FDLineup{
+        Players: players,
     }
-    return validLineups
+    l.calcSalary()
+    l.calcProjectedScore()
+    return l
 }
 
-func init() {
-    positions = map[string][]Player{
-        "RW": []Player{},
-        "LW": []Player{},
-        "D": []Player{}, 
-        "C": []Player{}, 
-        "G": []Player{},
+// func init() {
+// }
+
+func pickNext(p string) (Player, error) {
+    validPositions := []string{"RW", "LW", "C", "D", "G"}
+    if !contains(validPositions, p) {
+      return Player{}, errors.New("Invalid position requested")
     }
+    // This does nothing at the moment
+    return Player{}, nil
+}
+
+func contains(s []string, e string) bool {
+    for _, a := range s {
+        if a == e {
+            return true
+        }
+    }
+    return false
 }
 
 func main() {
+  var wg sync.WaitGroup
+  wg.Add(1)
+
+  go func() {
+      validLineups = []FDLineup{}
+      for len(validLineups) < 5000 {
+          l := <- lineupChan
+          if l.isValid() {
+            validLineups = append(validLineups, l)
+          }
+
+      }
+      sort.Sort(ByProjectedScore(validLineups))
+      i := 0
+      for i < 25 {
+          validLineups[i].PrintMe()
+          i++
+      }
+      wg.Done()
+  }()
 	goGetIt()
+  wg.Wait()
 }
 
 func sortIntoGroups(available []Player) {
@@ -215,6 +179,14 @@ func sortIntoGroups(available []Player) {
         positions[p.Position] = append(positions[p.Position], p)
     }
     return
+}
+
+func flattenGroups() []Player {
+    ret := []Player{}
+    for _, g := range positions {
+        ret = append(ret, g...)
+    }
+    return ret
 }
 
 func excludeLowScorers(available []Player) []Player {
@@ -236,10 +208,30 @@ func excludeBadGoalies(available []Player) []Player {
     return available
 }
 
+func excludeInjured(available []Player) []Player {
+    ret := []Player{}
+    for _, p := range available {
+        if !p.Injured {
+            ret = append(ret, p)
+        }
+    }
+    return ret
+}
+
 func excludeLowValue(available []Player) []Player {
     ret := []Player{}
     for _, p := range available {
         if p.value > 4 {
+            ret = append(ret, p)
+        }
+    }
+    return ret
+}
+
+func excludeLowGamesPlayed(available []Player) []Player {
+    ret := []Player{}
+    for _, p := range available {
+        if p.Played >= 5 {
             ret = append(ret, p)
         }
     }
@@ -256,34 +248,68 @@ func calcValues(available []Player) []Player {
 }
 
 
-func combine(v []Player, start int, n []Player, k, maxk int) {
-    i := start
+func combine(v []Player, rwStart, lwStart, cStart, dStart, gStart, k, maxk int) {
     /* k here counts through positions in the maxk-element v.
      * if k > maxk, then the v is complete and we can use it.
      */
     if (k >= maxk) {
-        /* insert code here to use combinations as you please */
-        for _, p := range v {
-           log.Println(p.FirstName, p.LastName, p.value)
-        }
-        log.Println("*******")
+        l := newFDLineup(v)
+        lineupChan <- l
         return
     }
     /* for this k'th element of the v, try all start..n
      * elements in that position
      */
-    for i < len(n) {
-        v[k] = n[i]
+    if k < 1 {
+      for gStart < len(positions["G"]) {
+        v[k] = positions["G"][gStart]
         /* recursively generate combinations of players
          * from i+1..n
          */
-        combine(v, i+1, n, k+1, maxk)
-        i++
+        combine(v, rwStart, lwStart, cStart, dStart, gStart+1, k+1, maxk)
+        gStart++
+      }
+    } else if k < 3 {
+      for rwStart < len(positions["RW"]) {
+        v[k] = positions["RW"][rwStart]
+        /* recursively generate combinations of players
+         * from i+1..n
+         */
+        combine(v, rwStart+1, lwStart, cStart, dStart, gStart, k+1, maxk)
+        rwStart++
+      }
+    } else if k < 5 {
+      for lwStart < len(positions["LW"]) {
+        v[k] = positions["LW"][lwStart]
+        /* recursively generate combinations of players
+         * from i+1..n
+         */
+        combine(v, rwStart, lwStart+1, cStart, dStart, gStart, k+1, maxk)
+        lwStart++
+      }
+    } else if k < 7 {
+      for cStart < len(positions["C"]) {
+        v[k] = positions["C"][cStart]
+        /* recursively generate combinations of players
+         * from i+1..n
+         */
+        combine(v, rwStart, lwStart, cStart+1, dStart, gStart, k+1, maxk)
+        cStart++
+      }
+    } else if k < 9 {
+      for dStart < len(positions["D"]) {
+        v[k] = positions["D"][dStart]
+        /* recursively generate combinations of players
+         * from i+1..n
+         */
+        combine(v, rwStart, lwStart, cStart, dStart+1, gStart, k+1, maxk)
+        dStart++
+      }
     }
 }
 
 func goGetIt() error {
-	url := "https://api.fanduel.com/fixture-lists/14112/players"
+	url := "https://api.fanduel.com/fixture-lists/14171/players"
     log.Println("URL: ", url)
 
     req, err := http.NewRequest("GET", url, nil)
@@ -304,23 +330,41 @@ func goGetIt() error {
     body, _ := ioutil.ReadAll(resp.Body)
     b := newFDPlayersResponse(body)
     log.Println("", len(b.Players))
-    d := excludeLowScorers(b.Players)
-    d = calcValues(d)
-    log.Println("", len(d))
+    d := excludeInjured(b.Players)
+    d = excludeLowGamesPlayed(d)
     d = excludeBadGoalies(d)
-    log.Println("", len(d))
-    d = excludeLowValue(d)
-    log.Println("", len(d))
+    d = calcValues(d)
+    sortIntoGroups(d)
+    for i, g := range positions {
+      var r []Player
+      if i != "G" {
+        sort.Sort(ByValue(g))
+        r = make([]Player, 10)
+        copy(r, g)
+      } else {
+        r = g
+      }
+      sort.Sort(ByFppg(r))
+      g = make([]Player, 5)
+      copy(g, r)
+      positions[i] = g
+    }
+
+
+    // d = flattenGroups()
+    // log.Println(d)
+    // d = excludeLowValue(d)
+    // log.Println("", len(d))
+
+
     /* generate all combinations of n elements taken
      * k at a time, starting with combinations containing 0
      * in the first position.
      */
-    k := 9
-    combine(make([]Player, k), 0, d, 0, k);
+    maxk := 9
+    combine(make([]Player, maxk), 0, 0, 0, 0, 0, 0, maxk);
+    close(lineupChan)
 
-    // sort.Sort(ByValue(d))
-    // sortIntoGroups(d)
-    
     // log.Println("goalies", len(positions["G"]))
     // for _, p := range positions["G"] {
     //     log.Println(p.FirstName, p.LastName, p.value)
